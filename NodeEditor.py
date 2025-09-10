@@ -1,3 +1,5 @@
+import time
+
 import dearpygui.dearpygui as dpg
 from collections import defaultdict, deque
 import traceback
@@ -8,6 +10,7 @@ class OutputNodeAttribute:
         self.uuid = dpg.generate_uuid()
         self._children = []  # output attributes
         self._data = None
+        self.custom = None
 
     def add_child(self, parent, child):
         # Check if connection already exists
@@ -35,9 +38,11 @@ class OutputNodeAttribute:
 
     def submit(self, parent):
         with dpg.node_attribute(parent=parent, attribute_type=dpg.mvNode_Attr_Output,
-                                user_data=self, id=self.uuid):
-            dpg.add_text(self._label)
-
+                                user_data=self, id=self.uuid, label=self._label):
+            if self.custom:
+                self.custom()
+            else:
+                dpg.add_text(self._label)
 
 class InputNodeAttribute:
     def __init__(self, label: str = "input"):
@@ -111,7 +116,7 @@ class Node:
     def custom(self):
         pass
 
-    def submit(self, parent):
+    def submit(self, parent, mparent):
         with dpg.node(parent=parent, label=self.label, tag=self.uuid):
             for attribute in self._input_attributes:
                 attribute.submit(self.uuid)
@@ -123,6 +128,14 @@ class Node:
             for attribute in self._output_attributes:
                 attribute.submit(self.uuid)
 
+        pos = dpg.get_mouse_pos(local=False)
+        ref_node = dpg.get_item_children(mparent, slot=1)[0]
+        ref_screen_pos = dpg.get_item_rect_min(ref_node)
+
+        pos[0] = pos[0] - (ref_screen_pos[0] + 150)
+        pos[1] = pos[1] - (ref_screen_pos[1])
+
+        dpg.set_item_pos(self.uuid, pos)
 
 class NodeEditor:
     @staticmethod
@@ -162,6 +175,7 @@ class NodeEditor:
     def __init__(self):
         self._nodes = []
         self.uuid = dpg.generate_uuid()
+        self.parent = None
 
     def add_node(self, node):
         self._nodes.append(node)
@@ -190,6 +204,9 @@ class NodeEditor:
 
     def _delete_selected(self, sender, app_data):
         """Enhanced deletion with better error handling"""
+        if not dpg.is_item_hovered(self.uuid):
+            return
+
         try:
             selected_nodes = dpg.get_selected_nodes(self.uuid) or []
             selected_links = dpg.get_selected_links(self.uuid) or []
@@ -252,7 +269,7 @@ class NodeEditor:
         source, generator, data = app_data
         node = generator(source.label, data)
 
-        node.submit(self.uuid)
+        node.submit(self.uuid, self.parent)
         self.add_node(node)
 
     def _build_execution_graph(self):
@@ -305,12 +322,14 @@ class NodeEditor:
 
         return execution_order
 
-    def submit(self, parent):
+    def submit(self, parent, width=-160):
+        self.parent = parent
+
         with dpg.handler_registry():
             dpg.add_key_down_handler(dpg.mvKey_Delete, callback=self._delete_selected)
             dpg.add_mouse_click_handler(dpg.mvMouseButton_Right, callback=self._right_click_menu)
 
-        with dpg.child_window(width=-160, parent=parent, user_data=self,
+        with dpg.child_window(width=width, parent=parent, user_data=self,
                               drop_callback=lambda s, a, u: dpg.get_item_user_data(s).on_drop(s, a, u)):
             with dpg.node_editor(tag=self.uuid,
                                  callback=NodeEditor._link_callback,

@@ -44,7 +44,7 @@ class TimelineWidget:
         }
 
         self.is_mouse_hold = False
-        self.mouse_first_click_pos = None
+        self.mouse_first_click_pos = (0, 0)
         self.past_x_pos = 0
         self.past_y_pos = 0
 
@@ -475,6 +475,8 @@ class TimelineWidget:
         if mouse_x > self.tracks_width and mouse_y > self.time_ruler_height:
             self.set_scroll_x(self.past_x_pos + (past_x - mouse_x))
 
+            self.render()
+
         if mouse_x > self.tracks_width and mouse_y < self.time_ruler_height:
             frame = self.x_to_frame(mouse_x)
             self.current_time = frame / self.frame_rate
@@ -482,8 +484,6 @@ class TimelineWidget:
             self.timeline.set_position(frame)
 
             self.render()
-
-        self.render()
 
     def set_playhead_frame(self, frame):
         """Set playhead to specific frame"""
