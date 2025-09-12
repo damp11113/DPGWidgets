@@ -36,17 +36,16 @@ class TimelineWidget:
         self.visible_tracks = []  # Will be populated with all tracks by default
 
         # Color scheme for different interpolation types
-        self.interpolation_colors = {
-            "linear": [100, 180, 255, 200],
-            "custom": [255, 150, 100, 200],
-            "bezier": [150, 255, 150, 200],
-            "step": [255, 255, 100, 200]
+        self.colors = {
+            "keyframe": [100, 180, 255, 200],
+            "statement": [255, 150, 100, 200]
         }
 
         self.is_mouse_hold = False
         self.mouse_first_click_pos = (0, 0)
         self.past_x_pos = 0
         self.past_y_pos = 0
+        self.last_frame_drag = 0
 
     def update_pixels_per_frame(self):
         """Update pixels per frame based on zoom level"""
@@ -118,25 +117,41 @@ class TimelineWidget:
                 track_label = f"{obj_id}.{track_name}"
 
                 clips = []
-                for keyframe in track_data.get('keyframe_details', []):
-                    start_frame = int(keyframe.get('start_pos', 0))
-                    duration_frames = int(keyframe.get('duration', 1))
+                for statement in track_data.get('keyframe_details', []):
+                    start_frame = int(statement.get('start_pos', 0))
+                    duration_frames = int(statement.get('duration', 1))
                     end_frame = start_frame + duration_frames
 
                     clip = {
-                        "id": keyframe.get('id', ''),
-                        "name": keyframe.get('id', track_name),
+                        "id": statement.get('id', ''),
+                        "name": statement.get('id', track_name),
                         "start_frame": start_frame,
                         "end_frame": end_frame,
                         "duration_frames": duration_frames,
-                        "start": keyframe.get('start_pos', 0),
-                        "end": keyframe.get('start_pos', 0) + keyframe.get('duration', 1),
-                        "interpolation": keyframe.get('interpolation', 'linear'),
-                        "has_custom_curve": keyframe.get('has_custom_curve', False),
-                        "color": self.interpolation_colors.get(
-                            keyframe.get('interpolation', 'linear'),
-                            [120, 120, 120, 200]
-                        )
+                        "start": statement.get('start_pos', 0),
+                        "end": statement.get('start_pos', 0) + statement.get('duration', 1),
+                        "interpolation": statement.get('interpolation', 'linear'),
+                        "has_custom_curve": statement.get('has_custom_curve', False),
+                        "color": self.colors.get("keyframe", [100, 180, 255, 200])
+                    }
+                    clips.append(clip)
+
+                for statement in track_data.get('statement_details', []):
+                    start_frame = int(statement.get('start_pos', 0))
+                    duration_frames = int(statement.get('duration', 1))
+                    end_frame = start_frame + duration_frames
+
+                    clip = {
+                        "id": statement.get('id', ''),
+                        "name": statement.get('id', track_name),
+                        "start_frame": start_frame,
+                        "end_frame": end_frame,
+                        "duration_frames": duration_frames,
+                        "start": statement.get('start_pos', 0),
+                        "end": statement.get('start_pos', 0) + statement.get('duration', 1),
+                        "interpolation": None,
+                        "has_custom_curve": False,
+                        "color": self.colors.get("statement", [255, 150, 100, 200])
                     }
                     clips.append(clip)
 
@@ -144,8 +159,7 @@ class TimelineWidget:
                     "label": track_label,
                     "object": obj_id,
                     "track": track_name,
-                    "clips": clips,
-                    "keyframe_count": track_data.get('keyframes', len(clips))
+                    "clips": clips
                 })
 
         return flattened_tracks
@@ -267,7 +281,7 @@ class TimelineWidget:
             )
 
             # Track name with keyframe count
-            label = f"{track['label']} ({track['keyframe_count']})"
+            label = f"{track['label']}"
             dpg.draw_text(
                 [5, y + 6], label,
                 parent=self.canvas_id,
@@ -452,11 +466,16 @@ class TimelineWidget:
 
         if mouse_x > self.tracks_width and mouse_y < self.time_ruler_height:
             frame = self.x_to_frame(mouse_x)
-            self.current_time = frame / self.frame_rate
-            self.current_frame = frame
-            self.timeline.set_position(frame)
 
-            self.render()
+            if self.last_frame_drag != frame:
+                self.current_time = frame / self.frame_rate
+                self.current_frame = frame
+                self.timeline.set_position(frame)
+                self.on_drag_playhead(frame)
+
+                self.last_frame_drag = frame
+
+                self.render()
 
     def handle_mouse_release(self):
         self.is_mouse_hold = False
@@ -479,11 +498,19 @@ class TimelineWidget:
 
         if mouse_x > self.tracks_width and mouse_y < self.time_ruler_height:
             frame = self.x_to_frame(mouse_x)
-            self.current_time = frame / self.frame_rate
-            self.current_frame = frame
-            self.timeline.set_position(frame)
 
-            self.render()
+            if self.last_frame_drag != frame:
+                self.current_time = frame / self.frame_rate
+                self.current_frame = frame
+                self.timeline.set_position(frame)
+                self.on_drag_playhead(frame)
+
+                self.last_frame_drag = frame
+
+                self.render()
+
+    def on_drag_playhead(self, delta_frames):
+        pass
 
     def set_playhead_frame(self, frame):
         """Set playhead to specific frame"""

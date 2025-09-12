@@ -1,8 +1,8 @@
-import time
-
+from typing import Dict, Any
 import dearpygui.dearpygui as dpg
 from collections import defaultdict, deque
 import traceback
+
 
 class OutputNodeAttribute:
     def __init__(self, label: str = "output"):
@@ -44,6 +44,22 @@ class OutputNodeAttribute:
             else:
                 dpg.add_text(self._label)
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert output attribute to dictionary format"""
+        return {
+            'label': self._label,
+            'uuid': self.uuid,
+            'type': 'output'
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'OutputNodeAttribute':
+        """Create output attribute from dictionary"""
+        attr = cls(data['label'])
+        attr.uuid = data['uuid']
+        return attr
+
+
 class InputNodeAttribute:
     def __init__(self, label: str = "input"):
         self._label = label
@@ -67,6 +83,21 @@ class InputNodeAttribute:
         with dpg.node_attribute(parent=parent, user_data=self, id=self.uuid):
             dpg.add_text(self._label)
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert input attribute to dictionary format"""
+        return {
+            'label': self._label,
+            'uuid': self.uuid,
+            'type': 'input'
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'InputNodeAttribute':
+        """Create input attribute from dictionary"""
+        attr = cls(data['label'])
+        attr.uuid = data['uuid']
+        return attr
+
 
 class Node:
     def __init__(self, label: str, data, process_func=None):
@@ -78,6 +109,7 @@ class Node:
         self._data = data
         self._process_func = process_func  # Custom processing function
         self._executed = False  # For tracking execution in render cycle
+        self._node_type = self.__class__.__name__  # Store node type for reconstruction
 
     def clear_all_connections(self):
         # Clear all input connections
@@ -137,6 +169,47 @@ class Node:
 
         dpg.set_item_pos(self.uuid, pos)
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert node to dictionary format"""
+        # Get node position if it exists in DPG
+        position = [0, 0]
+        try:
+            if dpg.does_item_exist(self.uuid):
+                position = list(dpg.get_item_pos(self.uuid))
+        except:
+            pass
+
+        return {
+            'label': self.label,
+            'uuid': self.uuid,
+            'static_uuid': self.static_uuid,
+            'node_type': self._node_type,
+            'data': self._data,
+            'position': position,
+            'input_attributes': [attr.to_dict() for attr in self._input_attributes],
+            'output_attributes': [attr.to_dict() for attr in self._output_attributes]
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'Node':
+        """Create node from dictionary"""
+        node = cls(data['label'], data['data'])
+        node.uuid = data['uuid']
+        node.static_uuid = data['static_uuid']
+
+        # Recreate input attributes
+        for attr_data in data['input_attributes']:
+            attr = InputNodeAttribute.from_dict(attr_data)
+            node.add_input_attribute(attr)
+
+        # Recreate output attributes
+        for attr_data in data['output_attributes']:
+            attr = OutputNodeAttribute.from_dict(attr_data)
+            node.add_output_attribute(attr)
+
+        return node
+
+
 class NodeEditor:
     @staticmethod
     def _link_callback(sender, app_data, user_data):
@@ -176,6 +249,11 @@ class NodeEditor:
         self._nodes = []
         self.uuid = dpg.generate_uuid()
         self.parent = None
+        self._node_generators = {}  # Registry for node generators
+
+    def register_node_generator(self, node_type: str, generator_func):
+        """Register a node generator function for loading"""
+        self._node_generators[node_type] = generator_func
 
     def add_node(self, node):
         self._nodes.append(node)
@@ -192,6 +270,14 @@ class NodeEditor:
         for node in self._nodes:
             if node.uuid == node_id:
                 return node
+        return None
+
+    def _find_attribute_by_id(self, attr_id):
+        """Find attribute by UUID across all nodes"""
+        for node in self._nodes:
+            for attr in node._input_attributes + node._output_attributes:
+                if attr.uuid == attr_id:
+                    return attr
         return None
 
     def _safe_delete_item(self, item_id):
@@ -322,6 +408,118 @@ class NodeEditor:
 
         return execution_order
 
+    def save(self) -> Dict[str, Any]:
+        """Export the node graph to dictionary format"""
+        # Collect connections
+        connections = []
+        for node in self._nodes:
+            for output_attr in node._output_attributes:
+                for input_attr in output_attr._children:
+                    connections.append({
+                        'output_attr_uuid': output_attr.uuid,
+                        'input_attr_uuid': input_attr.uuid
+                    })
+
+        return {
+            'version': '1.0',
+            'nodes': [node.to_dict() for node in self._nodes],
+            'connections': connections
+        }
+
+    def load(self, data: Dict[str, Any], clear_existing: bool = True):
+        """Import node graph from dictionary format"""
+        try:
+            if clear_existing:
+                self.clear_graph()
+
+            # Create nodes first
+            uuid_mapping = {}  # old_uuid -> new_node/attr
+
+            for node_data in data.get('nodes', []):
+                # Create node using registered generator or fallback to base Node class
+                node_type = node_data.get('node_type', 'Node')
+
+                if node_type in self._node_generators:
+                    node = self._node_generators[node_type](node_data['label'], node_data['data'])
+                else:
+                    node = Node.from_dict(node_data)
+
+                # Map old UUIDs to new objects
+                uuid_mapping[node_data['uuid']] = node
+
+                # Map attribute UUIDs
+                for i, attr_data in enumerate(node_data.get('input_attributes', [])):
+                    if i < len(node._input_attributes):
+                        uuid_mapping[attr_data['uuid']] = node._input_attributes[i]
+
+                for i, attr_data in enumerate(node_data.get('output_attributes', [])):
+                    if i < len(node._output_attributes):
+                        uuid_mapping[attr_data['uuid']] = node._output_attributes[i]
+
+                # Set position if available
+                if 'position' in node_data:
+                    # Position will be set after submitting to DPG
+                    node._load_position = node_data['position']
+
+                self.add_node(node)
+
+            # Recreate nodes in DPG if editor is already submitted
+            if dpg.does_item_exist(self.uuid):
+                # Clear existing visual nodes
+                children = dpg.get_item_children(self.uuid, slot=1) or []
+                for child in children:
+                    self._safe_delete_item(child)
+
+                # Submit new nodes
+                for node in self._nodes:
+                    node.submit(self.uuid, self.parent)
+
+                    # Set position if available
+                    if hasattr(node, '_load_position'):
+                        try:
+                            dpg.set_item_pos(node.uuid, node._load_position)
+                        except:
+                            pass
+                        delattr(node, '_load_position')
+
+            # Recreate connections
+            for conn_data in data.get('connections', []):
+                try:
+                    output_attr = uuid_mapping.get(conn_data['output_attr_uuid'])
+                    input_attr = uuid_mapping.get(conn_data['input_attr_uuid'])
+
+                    if output_attr and input_attr and hasattr(output_attr, 'add_child'):
+                        # Clear existing connection on input if any
+                        input_attr.clear_connection()
+                        # Add new connection
+                        if dpg.does_item_exist(self.uuid):
+                            output_attr.add_child(self.uuid, input_attr)
+                        else:
+                            # Store connection for later when editor is submitted
+                            output_attr._children.append(input_attr)
+                            input_attr.set_parent(output_attr)
+
+                except Exception as e:
+                    print(f"Error recreating connection: {e}")
+
+            print(f"Loaded {len(self._nodes)} nodes and {len(data.get('connections', []))} connections")
+            return True
+
+        except Exception as e:
+            print(f"Error loading graph: {e}")
+            traceback.print_exc()
+            return False
+
+    def clear_graph(self):
+        """Clear all nodes and connections"""
+        # Clear all connections first
+        for node in self._nodes[:]:  # Create copy to avoid modification during iteration
+            node.clear_all_connections()
+            if dpg.does_item_exist(node.uuid):
+                self._safe_delete_item(node.uuid)
+
+        self._nodes.clear()
+
     def submit(self, parent, width=-160):
         self.parent = parent
 
@@ -336,7 +534,15 @@ class NodeEditor:
                                  delink_callback=NodeEditor._delink_callback,
                                  width=-1, height=-1):
                 for node in self._nodes:
-                    node.submit(self.uuid)
+                    node.submit(self.uuid, self.parent)
+
+                    # Set position if it was loaded
+                    if hasattr(node, '_load_position'):
+                        try:
+                            dpg.set_item_pos(node.uuid, node._load_position)
+                        except:
+                            pass
+                        delattr(node, '_load_position')
 
     def process(self, data):
         """Enhanced process function with topological sorting and better error handling"""
@@ -371,8 +577,9 @@ class NodeEditor:
             traceback.print_exc()
 
 class DragSource:
-    def __init__(self, label: str, node_generator, data):
+    def __init__(self, label: str, node_generator, data, category: str = None):
         self.label = label
+        self.category = category
         self._generator = node_generator
         self._data = data
 
@@ -380,8 +587,7 @@ class DragSource:
         dpg.add_button(label=self.label, parent=parent, width=-1)
 
         with dpg.drag_payload(parent=dpg.last_item(), drag_data=(self, self._generator, self._data)):
-            dpg.add_text(f"Name: {self.label}")
-
+            dpg.add_text(self.label)
 
 class DragSourceContainer:
     def __init__(self, label: str, width: int = 150, height: int = -1):
@@ -394,11 +600,30 @@ class DragSourceContainer:
     def add_drag_source(self, source: DragSource):
         self._children.append(source)
 
+    def _group_by_category(self):
+        """Group drag sources by their category"""
+        categories = {}
+        for child in self._children:
+            category = child.category
+            if category not in categories:
+                categories[category] = []
+            categories[category].append(child)
+        return categories
+
     def submit(self, parent):
         with dpg.child_window(parent=parent, width=self._width, height=self._height, tag=self._uuid,
                               menubar=True) as child_parent:
             with dpg.menu_bar():
                 dpg.add_menu(label=self._label)
 
-            for child in self._children:
-                child.submit(child_parent)
+            # Group children by category and create collapsing headers
+            categories = self._group_by_category()
+
+            for category_name, sources in categories.items():
+                if category_name:
+                    with dpg.tree_node(label=category_name, parent=child_parent, default_open=True) as category_collaps:
+                        for source in sources:
+                            source.submit(category_collaps)
+                else:
+                    for source in sources:
+                        source.submit(child_parent)
