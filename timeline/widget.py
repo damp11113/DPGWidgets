@@ -493,6 +493,7 @@ class TimelineWidget:
 
         if mouse_x > self.tracks_width and mouse_y > self.time_ruler_height:
             self.set_scroll_x(self.past_x_pos + (past_x - mouse_x))
+            self.set_scroll_y(self.past_y_pos + (past_y - mouse_y))
 
             self.render()
 

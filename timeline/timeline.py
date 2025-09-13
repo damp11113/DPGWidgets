@@ -156,7 +156,6 @@ class StatementObject:
             return self.data
         return None
 
-
 class AnimationTrack:
     """Manages keyframes for a single property or object."""
 
