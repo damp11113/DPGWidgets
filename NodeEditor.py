@@ -1,3 +1,4 @@
+import time
 from typing import Dict, Any
 import dearpygui.dearpygui as dpg
 from collections import defaultdict, deque
@@ -110,6 +111,7 @@ class Node:
         self._process_func = process_func  # Custom processing function
         self._executed = False  # For tracking execution in render cycle
         self._node_type = self.__class__.__name__  # Store node type for reconstruction
+        self.is_error = False
 
     def clear_all_connections(self):
         # Clear all input connections
@@ -132,21 +134,30 @@ class Node:
     def reset_execution(self):
         """Reset execution state for new render cycle"""
         self._executed = False
+        self.is_error = False
 
     def execute(self, data=None):
         """Execute node and propagate data to outputs"""
         if self._executed:
             return data
 
-        self._executed = True
+        workingt1 = time.time()
 
         # Process the data
         output_data = self.process(data)
+
+        dpg.configure_item(self.uuid, label=f"{self.label} ({int((time.time() - workingt1) * 1000)} ms)")
+
+        self._executed = True
 
         return output_data
 
     def custom(self):
         pass
+
+    def setTitleError(self, title):
+        self.is_error = True
+        dpg.configure_item(self.uuid, label=f"{self.label} ({title})")
 
     def submit(self, parent, mparent):
         with dpg.node(parent=parent, label=self.label, tag=self.uuid):
@@ -290,9 +301,6 @@ class NodeEditor:
 
     def _delete_selected(self, sender, app_data):
         """Enhanced deletion with better error handling"""
-        if not dpg.is_item_hovered(self.uuid):
-            return
-
         try:
             selected_nodes = dpg.get_selected_nodes(self.uuid) or []
             selected_links = dpg.get_selected_links(self.uuid) or []
@@ -520,12 +528,22 @@ class NodeEditor:
 
         self._nodes.clear()
 
+    def on_mouse_click(self, sender, app_data):
+        if not dpg.is_item_hovered(self.uuid):
+            return
+
+        if app_data == dpg.mvMouseButton_Right:
+            self._right_click_menu(sender, app_data)
+
+    def on_key_press(self, sender, app_data):
+        if not dpg.is_item_hovered(self.uuid):
+            return
+
+        if app_data == dpg.mvKey_Delete:
+            self._delete_selected(sender, app_data)
+
     def submit(self, parent, width=-160):
         self.parent = parent
-
-        with dpg.handler_registry():
-            dpg.add_key_down_handler(dpg.mvKey_Delete, callback=self._delete_selected)
-            dpg.add_mouse_click_handler(dpg.mvMouseButton_Right, callback=self._right_click_menu)
 
         with dpg.child_window(width=width, parent=parent, user_data=self,
                               drop_callback=lambda s, a, u: dpg.get_item_user_data(s).on_drop(s, a, u)):
@@ -546,35 +564,31 @@ class NodeEditor:
 
     def process(self, data):
         """Enhanced process function with topological sorting and better error handling"""
-        try:
-            # Reset execution state for all nodes
-            for node in self._nodes:
-                node.reset_execution()
+        # Reset execution state for all nodes
+        for node in self._nodes:
+            node.reset_execution()
 
-            if not self._nodes:
-                return data
+        if not self._nodes:
+            return data
 
-            # Get execution order using topological sort
-            execution_order = self._topological_sort()
+        # Get execution order using topological sort
+        execution_order = self._topological_sort()
 
-            # Execute nodes in proper order
-            final_data = data
-            for node in execution_order:
-                try:
-                    final_data = node.execute(data)
-                except Exception as e:
-                    print(f"Error executing node {node.label}: {e}")
-                    traceback.print_exc()
+        # Execute nodes in proper order
+        final_data = data
+        for node in execution_order:
+            try:
+                final_data = node.execute(data)
+            except Exception as e:
+                node.setTitleError(str(e))
+                raise e
 
-            # Return the final processed frame or a default frame
-            if final_data is not None:
-                return final_data
-            else:
-                return data
+        # Return the final processed frame or a default frame
+        if final_data is not None:
+            return final_data
+        else:
+            return data
 
-        except Exception as e:
-            print(f"Error in render pipeline: {e}")
-            traceback.print_exc()
 
 class DragSource:
     def __init__(self, label: str, node_generator, data, category: str = None):

@@ -41,11 +41,14 @@ class TimelineWidget:
             "statement": [255, 150, 100, 200]
         }
 
-        self.is_mouse_hold = False
         self.mouse_first_click_pos = (0, 0)
         self.past_x_pos = 0
         self.past_y_pos = 0
         self.last_frame_drag = 0
+        self.is_mouse_dragging_playhead = False
+        self.is_mouse_dragging_pos = False
+        self.last_move_drag = (0, 0)
+        self.is_play = False # help to reduce rendering during playback
 
     def update_pixels_per_frame(self):
         """Update pixels per frame based on zoom level"""
@@ -335,7 +338,6 @@ class TimelineWidget:
                 thickness=1
             )
 
-
     def draw_keyframes(self, tracks):
         """Draw keyframe clips on the timeline"""
         start_track, end_track = self.get_visible_track_range()
@@ -447,12 +449,11 @@ class TimelineWidget:
                 color=[255, 100, 100, 255]
             )
 
-    def handle_mouse_click(self):
+    def handle_mouse_click(self, app_data):
         """Handle mouse clicks to move playhead"""
         if not dpg.is_item_hovered(self.canvas_id):
             return
 
-        self.is_mouse_hold = True
         self.past_x_pos = self.scroll_x
         self.past_y_pos = self.scroll_y
 
@@ -464,7 +465,7 @@ class TimelineWidget:
 
         self.mouse_first_click_pos = (mouse_x, mouse_y)
 
-        if mouse_x > self.tracks_width and mouse_y < self.time_ruler_height:
+        if mouse_x > self.tracks_width and mouse_y < self.time_ruler_height and app_data == 0:
             frame = self.x_to_frame(mouse_x)
 
             if self.last_frame_drag != frame:
@@ -475,13 +476,17 @@ class TimelineWidget:
 
                 self.last_frame_drag = frame
 
-                self.render()
+                if not self.is_play:
+                    self.render()
 
-    def handle_mouse_release(self):
-        self.is_mouse_hold = False
+    def handle_mouse_release(self, app_data):
+        if self.is_mouse_dragging_playhead and app_data == 0:
+            self.is_mouse_dragging_playhead = False
+        elif self.is_mouse_dragging_pos and app_data == 2:
+            self.is_mouse_dragging_pos = False
 
-    def handle_mouse_drag(self):
-        if not dpg.is_item_hovered(self.canvas_id):
+    def handle_mouse_drag(self, app_data):
+        if not dpg.is_item_hovered(self.canvas_id) and not (self.is_mouse_dragging_playhead or self.is_mouse_dragging_pos):
             return
 
         mouse_pos = dpg.get_mouse_pos(local=False)
@@ -491,14 +496,21 @@ class TimelineWidget:
 
         past_x, past_y = self.mouse_first_click_pos
 
-        if mouse_x > self.tracks_width and mouse_y > self.time_ruler_height:
-            self.set_scroll_x(self.past_x_pos + (past_x - mouse_x))
-            self.set_scroll_y(self.past_y_pos + (past_y - mouse_y))
+        if ((mouse_x > self.tracks_width and mouse_y > self.time_ruler_height) or self.is_mouse_dragging_pos) and app_data[0] == 2:
+            self.is_mouse_dragging_pos = True
 
-            self.render()
+            if self.last_move_drag != (mouse_x, mouse_y):
+                self.set_scroll_x(self.past_x_pos + (past_x - mouse_x))
+                self.set_scroll_y(self.past_y_pos + (past_y - mouse_y))
 
-        if mouse_x > self.tracks_width and mouse_y < self.time_ruler_height:
+                self.last_move_drag = (mouse_x, mouse_y)
+
+                if not self.is_play:
+                    self.render()
+
+        if ((mouse_x > self.tracks_width and mouse_y < self.time_ruler_height) or self.is_mouse_dragging_playhead) and app_data[0] == 0:
             frame = self.x_to_frame(mouse_x)
+            self.is_mouse_dragging_playhead = True
 
             if self.last_frame_drag != frame:
                 self.current_time = frame / self.frame_rate
@@ -508,7 +520,8 @@ class TimelineWidget:
 
                 self.last_frame_drag = frame
 
-                self.render()
+                if not self.is_play:
+                    self.render()
 
     def on_drag_playhead(self, delta_frames):
         pass
@@ -542,7 +555,8 @@ class TimelineWidget:
             else:
                 self.set_scroll_y(self.scroll_y + scroll_speed)
 
-        self.render()
+        if not self.is_play:
+            self.render()
 
     def render(self):
         """Main render function"""
