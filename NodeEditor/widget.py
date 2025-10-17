@@ -8,6 +8,7 @@ import uuid6
 
 from .node import NodeType, NodeManager
 
+
 class NodeEditor:
     @staticmethod
     def _link_callback(sender, app_data, user_data):
@@ -360,6 +361,13 @@ class NodeEditor:
 
         return execution_order
 
+    def _setup_node_helpers(self, node, execution_order, current_index, executed_nodes, execution_count, data, final_data):
+        """Setup helper methods for a node"""
+        node.execute_next_nodes = lambda n=node, idx=current_index: self._execute_next_nodes(n, execution_order, idx, executed_nodes, execution_count, data, final_data)
+        node.execute_connected_next_nodes = lambda n=node, idx=current_index: self._execute_connected_next_nodes(n, execution_order, idx, executed_nodes, execution_count, data, final_data)
+        node.execute_connected_next_nodes_multiple = lambda times, n=node, idx=current_index: self._execute_connected_next_nodes_multiple(n, execution_order, idx, executed_nodes, execution_count, data, final_data, times)
+        node.get_execution_count = lambda n=node: execution_count[n]
+
     def process(self, data, no_sort=False):
         """Enhanced process function with topological sorting and self-execution support"""
         # Reset execution state for all nodes
@@ -391,24 +399,9 @@ class NodeEditor:
                 continue
 
             try:
-                # Provide helper functions to the node
-                if is_self_execute:
-                    node.execute_past_nodes = lambda n=node, idx=i: self._execute_past_nodes(n, execution_order, idx,
-                                                                                             executed_nodes,
-                                                                                             execution_count, data)
-                    node.execute_next_nodes = lambda n=node, idx=i: self._execute_next_nodes(n, execution_order, idx,
-                                                                                             executed_nodes,
-                                                                                             execution_count, data,
-                                                                                             final_data)
-                    node.execute_connected_next_nodes = lambda n=node, idx=i: self._execute_connected_next_nodes(n,
-                                                                                                                 execution_order,
-                                                                                                                 idx,
-                                                                                                                 executed_nodes,
-                                                                                                                 execution_count,
-                                                                                                                 data,
-                                                                                                                 final_data)
-                    # Provide execution count to the node
-                    node.get_execution_count = lambda n=node: execution_count[n]
+                # Provide helper functions to ALL nodes (not just self_execute ones)
+                # This ensures nested execution calls work properly
+                self._setup_node_helpers(node, execution_order, i, executed_nodes, execution_count, data, final_data)
 
                 # Execute the current node
                 if node._node_type == NodeType.INPUT:
@@ -435,31 +428,19 @@ class NodeEditor:
         else:
             return data
 
-    def _execute_past_nodes(self, current_node, execution_order, current_index, executed_nodes, execution_count, data):
-        """Execute all nodes that come before the current node"""
-        past_results = []
-        for i in range(current_index):
-            node = execution_order[i]
-            # Allow re-execution if node is self_execute, otherwise check if already executed
-            is_self_execute = hasattr(node, 'self_execute') and node.self_execute
+    def _execute_connected_next_nodes_multiple(self, current_node, execution_order, current_index, executed_nodes,
+                                               execution_count, data, final_data, times):
+        """Execute connected next nodes multiple times (for loop-like behavior)"""
+        all_results = []
 
-            if node not in executed_nodes or is_self_execute:
-                try:
-                    if node._node_type == NodeType.INPUT:
-                        result = node.execute(data)
-                    elif node._node_type == NodeType.PROCESS:
-                        result = node.execute(None)
-                    else:
-                        result = node.execute(data)
+        for iteration in range(times):
+            iteration_results = self._execute_connected_next_nodes(
+                current_node, execution_order, current_index,
+                executed_nodes, execution_count, data, final_data
+            )
+            all_results.append(iteration_results)
 
-                    executed_nodes.add(node)
-                    execution_count[node] += 1
-                    past_results.append(result)
-                except Exception as e:
-                    node.setTitleError(str(e))
-                    raise e
-
-        return past_results
+        return all_results
 
     def _execute_connected_next_nodes(self, current_node, execution_order, current_index, executed_nodes,
                                       execution_count, data, final_data):
@@ -475,12 +456,15 @@ class NodeEditor:
             is_self_execute = hasattr(next_node, 'self_execute') and next_node.self_execute
 
             # First, ensure all dependencies of this node are executed
-            self._ensure_dependencies_executed(next_node, execution_order, executed_nodes, execution_count, data,
-                                               final_data)
+            self._ensure_dependencies_executed(next_node, execution_order, executed_nodes, execution_count, data, final_data)
 
             # Execute the connected node (allow re-execution for self_execute nodes)
             if next_node not in executed_nodes or is_self_execute:
                 try:
+                    # Setup helper methods for the node being executed
+                    self._setup_node_helpers(next_node, execution_order, current_index,
+                                             executed_nodes, execution_count, data, final_data)
+
                     if next_node._node_type == NodeType.INPUT:
                         result = next_node.execute(data)
                     elif next_node._node_type == NodeType.PROCESS:
@@ -596,6 +580,7 @@ class NodeEditor:
 
         return next_nodes
 
+
 class DragSource:
     def __init__(self, label: str, nodeID, data, category: str = None):
         self.label = label
@@ -608,6 +593,7 @@ class DragSource:
 
         with dpg.drag_payload(parent=dpg.last_item(), drag_data=(self, self.nodeID, self._data)):
             dpg.add_text(self.label)
+
 
 class DragSourceContainer:
     def __init__(self, label: str, width: int = 150, height: int = -1):

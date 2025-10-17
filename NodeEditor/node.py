@@ -1,6 +1,7 @@
 import time
 import dearpygui.dearpygui as dpg
 from typing import Dict, Any
+import collections
 
 class NodeType:
     INPUT = 0 # Can get data from system but not send output data to system
@@ -37,7 +38,7 @@ class OutputNodeAttribute:
     def set_data(self, data):
         self._data = data
         for child in self._children:
-            child._data = self._data
+            child.buffer.append(data)
 
     def clear_connections(self):
         for child in self._children[:]:  # Create a copy to avoid modification during iteration
@@ -63,11 +64,13 @@ class OutputNodeAttribute:
         }
 
 class InputNodeAttribute:
-    def __init__(self, label: str = "input", id=None):
+    def __init__(self, label: str = "input", id=None, buffersize=10):
         self._label = label
         self.uuid = dpg.generate_uuid()
         self._parent = None
-        self._data = None
+        self.last_data = None
+
+        self.buffer = collections.deque(maxlen=buffersize)
 
         if not id:
             self.id = label + str(self.uuid)
@@ -75,7 +78,12 @@ class InputNodeAttribute:
             self.id = id
 
     def get_data(self):
-        return self._data
+        try:
+            data = self.buffer.popleft()
+        except IndexError:
+            data = self.last_data
+
+        return data
 
     def set_parent(self, parent: OutputNodeAttribute):
         self._parent = parent
@@ -84,7 +92,8 @@ class InputNodeAttribute:
         if self._parent:
             self._parent.remove_child(self)
         self._parent = None
-        self._data = None
+        self.buffer.clear()
+        self.last_data = None
 
     def submit(self, parent):
         with dpg.node_attribute(parent=parent, user_data=self, id=self.uuid):
@@ -99,6 +108,7 @@ class InputNodeAttribute:
             'type': 'input'
         }
 
+
 class Node:
     def __init__(self, label: str, data, nodetype=NodeType.IPO, priority=0):
         self.label = label
@@ -107,7 +117,7 @@ class Node:
         self._input_attributes = []
         self._output_attributes = []
         self._data = data
-        self._executed = False  # For tracking execution in render cycle
+        self._executed = False
         self._node_type = nodetype
         self.is_error = False
         self.init_pos = None
@@ -115,20 +125,16 @@ class Node:
         self.priority = priority
         self.output_topic = None
         self.input_topic = None
+        self._is_submitted = False  # Track if node is rendered
 
         # for Self-execute node
-        self.self_execute = False  # Enable self-execution
-        self.execute_past_nodes = None  # Will be set by process()
-        self.execute_next_nodes = None  # Will be set by process()
+        self.self_execute = False
+        self.execute_next_nodes = None
         self.execute_connected_next_nodes = None
+        self.execute_connected_next_nodes_multiple = None
         self.get_execution_count = None
 
         self.internal_data = {}
-
-        self.onInit()
-
-    def onInit(self):
-        pass
 
     def onCreate(self):
         pass
@@ -145,11 +151,89 @@ class Node:
         for output_attr in self._output_attributes:
             output_attr.clear_connections()
 
-    def add_input_attribute(self, attribute: InputNodeAttribute):
+    def add_input_attribute(self, attribute: InputNodeAttribute, dynamic=False):
+        """Add input attribute, optionally rendering it if node is already submitted"""
         self._input_attributes.append(attribute)
 
-    def add_output_attribute(self, attribute: OutputNodeAttribute):
+        if dynamic and self._is_submitted:
+            # Find the position to insert (before static attribute)
+            attribute.submit(self.uuid)
+            # Reorder to place before static content
+            dpg.move_item(attribute.uuid, parent=self.uuid, before=self.static_uuid)
+
+    def add_output_attribute(self, attribute: OutputNodeAttribute, dynamic=False):
+        """Add output attribute, optionally rendering it if node is already submitted"""
         self._output_attributes.append(attribute)
+
+        if dynamic and self._is_submitted:
+            # Output attributes go after static content
+            attribute.submit(self.uuid)
+
+    def remove_input_attribute(self, attribute: InputNodeAttribute):
+        """Remove input attribute and clean up connections"""
+        if attribute in self._input_attributes:
+            # Clear connections first
+            attribute.clear_connection()
+
+            # Remove from list
+            self._input_attributes.remove(attribute)
+
+            # Delete DPG item if it exists
+            if self._is_submitted and dpg.does_item_exist(attribute.uuid):
+                dpg.delete_item(attribute.uuid)
+
+    def remove_output_attribute(self, attribute: OutputNodeAttribute):
+        """Remove output attribute and clean up connections"""
+        if attribute in self._output_attributes:
+            # Clear connections first
+            attribute.clear_connections()
+
+            # Remove from list
+            self._output_attributes.remove(attribute)
+
+            # Delete DPG item if it exists
+            if self._is_submitted and dpg.does_item_exist(attribute.uuid):
+                dpg.delete_item(attribute.uuid)
+
+    def remove_input_attribute_by_index(self, index: int):
+        """Remove input attribute by index"""
+        if 0 <= index < len(self._input_attributes):
+            self.remove_input_attribute(self._input_attributes[index])
+
+    def remove_output_attribute_by_index(self, index: int):
+        """Remove output attribute by index"""
+        if 0 <= index < len(self._output_attributes):
+            self.remove_output_attribute(self._output_attributes[index])
+
+    def get_input_attribute(self, index: int):
+        """Get input attribute by index"""
+        if 0 <= index < len(self._input_attributes):
+            return self._input_attributes[index]
+        return None
+
+    def get_output_attribute(self, index: int):
+        """Get output attribute by index"""
+        if 0 <= index < len(self._output_attributes):
+            return self._output_attributes[index]
+        return None
+
+    def clear_all_output_attribute(self):
+        for output_attr in self._output_attributes:
+            output_attr.clear_connections()
+
+        for attr in self._output_attributes:
+            dpg.delete_item(attr.uuid)
+
+        self._output_attributes = []
+
+    def clear_all_input_attribute(self):
+        for input_attr in self._input_attributes:
+            input_attr.clear_connection()
+
+        for attr in self._input_attributes:
+            dpg.delete_item(attr.uuid)
+
+        self._input_attributes = []
 
     def process(self, data):
         pass
@@ -198,17 +282,10 @@ class Node:
 
         if not self.init_pos:
             pos = dpg.get_mouse_pos(local=False)
-
-            #ref_node = dpg.get_item_children(mparent, slot=1)[0]
-            #ref_screen_pos = dpg.get_item_rect_min(ref_node)
-#
-            #pos[0] = pos[0] - (ref_screen_pos[0] + 150)
-            #pos[1] = pos[1] - (ref_screen_pos[1])
-#
-            #dpg.set_item_pos(self.uuid, pos)
         else:
             dpg.set_item_pos(self.uuid, self.init_pos)
 
+        self._is_submitted = True
         self.onCreate()
 
     def to_dict(self) -> Dict[str, Any]:
