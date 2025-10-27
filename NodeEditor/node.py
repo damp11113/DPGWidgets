@@ -80,6 +80,7 @@ class InputNodeAttribute:
     def get_data(self):
         try:
             data = self.buffer.popleft()
+            self.last_data = data
         except IndexError:
             data = self.last_data
 
