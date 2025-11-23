@@ -678,7 +678,7 @@ class TimelineWidget:
             return None, None, None
 
         # Find clip at this position
-        frame = self.x_to_frame(mouse_x)
+        frame = self.x_to_frame(mouse_x) + 1
         track = tracks[track_idx]
 
         edge_threshold = max(3, min(8, self.pixels_per_frame * 2))  # Adaptive edge detection

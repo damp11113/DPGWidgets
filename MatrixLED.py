@@ -300,7 +300,7 @@ class MatrixLEDWidget:
             mled = self.devices[device]
             if 0 <= row < mled.height and 0 <= col < mled.width:
                 self.state[device][row][col] = state
-                self._safe_render()
+                #self._safe_render()
 
     def setPixel(self, x, y, state):
         """Set a single pixel (uses device 0)"""
@@ -356,10 +356,12 @@ class MatrixLEDWidget:
 
         return (r, g, b, 255)
 
-    def _safe_render(self):
+    def _safe_render(self, immediate=False):
         """Safe render that prevents recursion and rate-limits"""
-        # Mark for render instead of rendering immediately
-        self.needs_render = True
+        if immediate and not self.is_rendering:
+            self.render()
+        else:
+            self.needs_render = True
 
     def update(self):
         """Call this in your main loop to process pending renders"""
