@@ -1,5 +1,8 @@
-from .timeline import Timeline
+import time
 import dearpygui.dearpygui as dpg
+import sys
+
+from .timeline import Timeline
 
 class TimelineWidget:
     def __init__(self, canvas_id, timeline: Timeline, width=800, height=320):
@@ -49,6 +52,17 @@ class TimelineWidget:
         self.is_mouse_dragging_pos = False
         self.last_move_drag = (0, 0)
         self.is_play = False # help to reduce rendering during playback
+        self.disable_dragging_playhead = False
+
+        self.editor_mode_enabled = True
+        self.editor_callback = None
+        # Editor state tracking
+        self.selected_clip = None
+        self.drag_mode = None  # None, 'move', 'resize_front', 'resize_back'
+        self.drag_start_frame = 0
+        self.drag_start_clip_data = None
+        self.last_double_click_time = 0
+        self.last_double_click_clip = None
 
     def update_pixels_per_frame(self):
         """Update pixels per frame based on zoom level"""
@@ -479,6 +493,11 @@ class TimelineWidget:
                 if not self.is_play:
                     self.render()
 
+        if self.editor_mode_enabled:
+            tracks = self.get_flattened_tracks(self.timeline.get_timeline_info())
+            if self.handle_editor_mouse_click(app_data, tracks):
+                return
+
     def handle_mouse_release(self, app_data):
         if self.is_mouse_dragging_playhead and app_data == 0:
             self.is_mouse_dragging_playhead = False
@@ -508,7 +527,7 @@ class TimelineWidget:
                 if not self.is_play:
                     self.render()
 
-        if ((mouse_x > self.tracks_width and mouse_y < self.time_ruler_height) or self.is_mouse_dragging_playhead) and app_data[0] == 0:
+        if ((mouse_x > self.tracks_width and mouse_y < self.time_ruler_height) or self.is_mouse_dragging_playhead) and app_data[0] == 0 and not self.disable_dragging_playhead:
             frame = self.x_to_frame(mouse_x)
             self.is_mouse_dragging_playhead = True
 
@@ -522,6 +541,11 @@ class TimelineWidget:
 
                 if not self.is_play:
                     self.render()
+
+        if self.editor_mode_enabled:
+            tracks = self.get_flattened_tracks(self.timeline.get_timeline_info())
+            if self.handle_editor_mouse_drag(app_data, tracks):
+                return
 
     def on_drag_playhead(self, delta_frames):
         pass
@@ -558,6 +582,325 @@ class TimelineWidget:
         if not self.is_play:
             self.render()
 
+    def set_editor_mode(self, enabled):
+        """
+        Enable/disable editor mode for interactive keyframe editing
+
+        Args:
+            enabled (bool): True to enable editor mode, False to disable
+            callback (callable): Callback function with signature:
+                callback(action_type, object_id, track_name, clip_id, dragged_frame, dragged_front)
+
+                action_type:
+                    0 = move
+                    1 = change length (extend/trim)
+                    2 = double click
+
+                object_id: The object ID the clip belongs to
+                track_name: The track name
+                clip_id: The clip/keyframe ID
+                dragged_frame: Frame delta (positive=extend, negative=trim)
+                dragged_front: True=front edge, False=back edge
+        """
+        self.editor_mode_enabled = enabled
+
+    def get_clip_at_position(self, mouse_x, mouse_y, tracks):
+        """
+        Find the clip at the given mouse position
+
+        Returns:
+            tuple: (track_idx, clip_idx, edge_type) or (None, None, None)
+            edge_type: 'front', 'back', 'middle', or None
+        """
+        if mouse_x <= self.tracks_width or mouse_y <= self.time_ruler_height:
+            return None, None, None
+
+        # Determine which track
+        track_y_offset = mouse_y - self.time_ruler_height + self.scroll_y
+        track_idx = int(track_y_offset / (self.track_height + self.track_padding))
+
+        if track_idx < 0 or track_idx >= len(tracks):
+            return None, None, None
+
+        # Check if mouse is within track height
+        track_y = self.time_ruler_height + (
+                    track_idx * (self.track_height + self.track_padding)) + self.track_padding - self.scroll_y
+        if mouse_y < track_y or mouse_y > track_y + self.track_height:
+            return None, None, None
+
+        # Find clip at this position
+        frame = self.x_to_frame(mouse_x)
+        track = tracks[track_idx]
+
+        edge_threshold = max(3, min(8, self.pixels_per_frame * 2))  # Adaptive edge detection
+
+        for clip_idx, clip in enumerate(track["clips"]):
+            if clip["start_frame"] <= frame <= clip["end_frame"]:
+                clip_start_x = self.frame_to_x(clip["start_frame"])
+                clip_end_x = self.frame_to_x(clip["end_frame"])
+
+                # Check if near front edge
+                if abs(mouse_x - clip_start_x) <= edge_threshold:
+                    return track_idx, clip_idx, 'front'
+                # Check if near back edge
+                elif abs(mouse_x - clip_end_x) <= edge_threshold:
+                    return track_idx, clip_idx, 'back'
+                # Middle of clip
+                else:
+                    return track_idx, clip_idx, 'middle'
+
+        return None, None, None
+
+    def handle_editor_mouse_click(self, app_data, tracks):
+        """Handle mouse clicks in editor mode"""
+        mouse_pos = dpg.get_mouse_pos(local=False)
+        canvas_pos = dpg.get_item_rect_min(self.canvas_id)
+        mouse_x = mouse_pos[0] - canvas_pos[0]
+        mouse_y = mouse_pos[1] - canvas_pos[1]
+
+        # Left click only
+        if app_data != 0:
+            return False
+
+        # Check for double-click
+        current_time = time.time()
+        is_double_click = False
+
+        track_idx, clip_idx, edge_type = self.get_clip_at_position(mouse_x, mouse_y, tracks)
+
+
+        if track_idx is not None and clip_idx is not None:
+            clip = tracks[track_idx]["clips"][clip_idx]
+
+            # Double-click detection (within 300ms)
+            if (current_time - self.last_double_click_time < 0.3 and
+                    self.last_double_click_clip == clip["id"]):
+                is_double_click = True
+
+                # Trigger double-click callback
+                if self.editor_callback:
+                    self.editor_callback(
+                        action_type=2,  # Double click
+                        is_curve=clip.get("interpolation") is not None,
+                        object_id=tracks[track_idx]["object"],
+                        track_name=tracks[track_idx]["track"],
+                        clip_id=clip["id"],
+                        dragged_frame=0,
+                        dragged_front=False
+                    )
+
+                self.last_double_click_time = 0
+                self.last_double_click_clip = None
+                return True
+            else:
+                self.last_double_click_time = current_time
+                self.last_double_click_clip = clip["id"]
+
+            # Start drag operation
+            self.selected_clip = {
+                'track_idx': track_idx,
+                'clip_idx': clip_idx,
+                "is_curve": clip.get("interpolation") is not None,
+                'track_object': tracks[track_idx]["object"],
+                'track_name': tracks[track_idx]["track"],
+                'clip_id': clip["id"]
+            }
+
+            self.drag_start_frame = self.x_to_frame(mouse_x)
+            self.drag_start_clip_data = {
+                'start_frame': clip["start_frame"],
+                'end_frame': clip["end_frame"],
+                'duration_frames': clip["duration_frames"]
+            }
+
+            # Determine drag mode based on edge
+            if edge_type == 'front':
+                self.drag_mode = 'resize_front'
+            elif edge_type == 'back':
+                self.drag_mode = 'resize_back'
+            else:
+                self.drag_mode = 'move'
+
+            return True
+        else:
+            # Clicked on empty space - deselect
+            self.selected_clip = None
+            self.drag_mode = None
+
+        return False
+
+    def handle_editor_mouse_drag(self, app_data, tracks):
+        """Handle mouse drag in editor mode"""
+        if not self.drag_mode or not self.selected_clip:
+            return False
+
+        if app_data[0] != 0:  # Only handle left mouse button
+            return False
+
+        mouse_pos = dpg.get_mouse_pos(local=False)
+        canvas_pos = dpg.get_item_rect_min(self.canvas_id)
+        mouse_x = mouse_pos[0] - canvas_pos[0]
+
+        current_frame = self.x_to_frame(mouse_x)
+        frame_delta = current_frame - self.drag_start_frame
+
+        if frame_delta == 0:
+            return False
+
+        # Get the clip being dragged
+        track_idx = self.selected_clip['track_idx']
+        clip_idx = self.selected_clip['clip_idx']
+
+        if track_idx >= len(tracks) or clip_idx >= len(tracks[track_idx]["clips"]):
+            return False
+
+        clip = tracks[track_idx]["clips"][clip_idx]
+
+        # Calculate new positions based on drag mode
+        if self.drag_mode == 'move':
+            # Moving entire clip
+            new_start = self.drag_start_clip_data['start_frame'] + frame_delta
+            new_end = self.drag_start_clip_data['end_frame'] + frame_delta
+
+            # Bounds checking
+            #if new_start < 0:
+            #    frame_delta = -self.drag_start_clip_data['start_frame']
+
+            if frame_delta != 0 and self.editor_callback:
+                self.editor_callback(
+                    action_type=0,  # Move
+                    is_curve=self.selected_clip['is_curve'],
+                    object_id=self.selected_clip['track_object'],
+                    track_name=self.selected_clip['track_name'],
+                    clip_id=self.selected_clip['clip_id'],
+                    dragged_frame=frame_delta,
+                    dragged_front=False
+                )
+
+                # Update drag start for continuous dragging
+                self.drag_start_frame = current_frame
+                self.drag_start_clip_data['start_frame'] = new_start
+                self.drag_start_clip_data['end_frame'] = new_end
+
+            return True
+
+        elif self.drag_mode == 'resize_front':
+            # Resizing from front edge
+            new_start = self.drag_start_clip_data['start_frame'] + frame_delta
+
+            # Don't allow resizing past the end
+            if new_start >= self.drag_start_clip_data['end_frame']:
+                return False
+
+            # Don't allow negative start
+            if new_start < 0:
+                frame_delta = -self.drag_start_clip_data['start_frame']
+
+            if frame_delta != 0 and self.editor_callback:
+                self.editor_callback(
+                    action_type=1,  # Change length
+                    is_curve=self.selected_clip['is_curve'],
+                    object_id=self.selected_clip['track_object'],
+                    track_name=self.selected_clip['track_name'],
+                    clip_id=self.selected_clip['clip_id'],
+                    dragged_frame=frame_delta,
+                    dragged_front=True
+                )
+
+                # Update drag start for continuous dragging
+                self.drag_start_frame = current_frame
+                self.drag_start_clip_data['start_frame'] = new_start
+                self.drag_start_clip_data['duration_frames'] = self.drag_start_clip_data['end_frame'] - new_start
+
+            return True
+
+        elif self.drag_mode == 'resize_back':
+            # Resizing from back edge
+            new_end = self.drag_start_clip_data['end_frame'] + frame_delta
+
+            # Don't allow resizing past the start
+            if new_end <= self.drag_start_clip_data['start_frame']:
+                return False
+
+            if frame_delta != 0 and self.editor_callback:
+                self.editor_callback(
+                    action_type=1,  # Change length
+                    is_curve=self.selected_clip['is_curve'],
+                    object_id=self.selected_clip['track_object'],
+                    track_name=self.selected_clip['track_name'],
+                    clip_id=self.selected_clip['clip_id'],
+                    dragged_frame=frame_delta,
+                    dragged_front=False
+                )
+
+                # Update drag start for continuous dragging
+                self.drag_start_frame = current_frame
+                self.drag_start_clip_data['end_frame'] = new_end
+                self.drag_start_clip_data['duration_frames'] = new_end - self.drag_start_clip_data['start_frame']
+
+            return True
+
+        return False
+
+    def handle_editor_mouse_release(self, app_data):
+        """Handle mouse release in editor mode"""
+        if not self.editor_mode_enabled:
+            return False
+
+        if app_data == 0:  # Left mouse button
+            self.drag_mode = None
+            self.drag_start_frame = 0
+            self.drag_start_clip_data = None
+            return True
+
+        return False
+
+    def update_editor_cursor(self, tracks):
+        """Update cursor based on hover position in editor mode"""
+        if not self.editor_mode_enabled or not dpg.is_item_hovered(self.canvas_id):
+            return
+
+        mouse_pos = dpg.get_mouse_pos(local=False)
+        canvas_pos = dpg.get_item_rect_min(self.canvas_id)
+        mouse_x = mouse_pos[0] - canvas_pos[0]
+        mouse_y = mouse_pos[1] - canvas_pos[1]
+
+        track_idx, clip_idx, edge_type = self.get_clip_at_position(mouse_x, mouse_y, tracks)
+
+        if edge_type in ['front', 'back']:
+            set_cursor_windows(32644)  # IDC_SIZEWE (horizontal resize)
+        elif edge_type == 'middle':
+            set_cursor_windows(32646)  # IDC_SIZEALL (move)
+        else:
+            set_cursor_windows(32512)  # IDC_ARROW
+
+    def draw_editor_highlights(self, tracks):
+        """Draw visual highlights for selected clips in editor mode"""
+        if not self.editor_mode_enabled or not self.selected_clip:
+            return
+
+        track_idx = self.selected_clip['track_idx']
+        clip_idx = self.selected_clip['clip_idx']
+
+        if track_idx >= len(tracks) or clip_idx >= len(tracks[track_idx]["clips"]):
+            return
+
+        clip = tracks[track_idx]["clips"][clip_idx]
+        y = self.time_ruler_height + (
+                    track_idx * (self.track_height + self.track_padding)) + self.track_padding - self.scroll_y
+
+        start_x = self.frame_to_x(clip["start_frame"])
+        end_x = self.frame_to_x(clip["end_frame"])
+
+        # Draw selection highlight
+        dpg.draw_rectangle(
+            [max(start_x, self.tracks_width), y],
+            [min(end_x, self.width), y + self.track_height],
+            parent=self.canvas_id,
+            color=[255, 255, 100, 255],
+            thickness=2
+        )
+
     def render(self):
         """Main render function"""
         # Clear canvas
@@ -574,6 +917,9 @@ class TimelineWidget:
         # Get tracks
         tracks = self.get_flattened_tracks(timeline_data)
         self.visible_tracks = tracks
+
+        if self.editor_mode_enabled:
+            self.draw_editor_highlights(tracks)
 
         # Draw all components
         self.draw_timeline_area(tracks)
