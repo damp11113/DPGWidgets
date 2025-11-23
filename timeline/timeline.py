@@ -528,6 +528,127 @@ class Timeline:
 
         return info
 
+    def export_timeline(self) -> Dict[str, Any]:
+        """Export timeline to a dictionary format."""
+        export_data = {
+            'version': '1.0',
+            'total_frames': self.total_frames,
+            'frame_rate': self.frame_rate,
+            'current_position': self.current_position,
+            'objects': {}
+        }
+
+        for obj_id, obj in self.objects.items():
+            obj_data = {
+                'id': obj_id,
+                'metadata': obj.metadata,
+                'tracks': {}
+            }
+
+            for track_name, track in obj.tracks.items():
+                track_data = {
+                    'keyframes': [],
+                    'statements': []
+                }
+
+                # Export keyframes
+                for kf in track.keyframes:
+                    kf_data = {
+                        'id': kf.id,
+                        'start_pos': kf.start_pos,
+                        'start_value': kf.start_value,
+                        'end_pos': kf.end_pos,
+                        'end_value': kf.end_value,
+                        'interpolation_type': kf.interpolation_type.value,
+                        'has_custom_curve': kf.curve_function is not None
+                        # Note: Custom curve functions cannot be serialized
+                    }
+                    track_data['keyframes'].append(kf_data)
+
+                # Export statements
+                for stmt in track.statements:
+                    stmt_data = {
+                        'id': stmt.id,
+                        'start_pos': stmt.start_pos,
+                        'end_pos': stmt.end_pos,
+                        'data': stmt.data,
+                        'active': stmt.active
+                    }
+                    track_data['statements'].append(stmt_data)
+
+                obj_data['tracks'][track_name] = track_data
+
+            export_data['objects'][obj_id] = obj_data
+
+        return export_data
+
+    def import_timeline(self, data: Dict[str, Any], clear_existing: bool = True) -> 'Timeline':
+        """Import timeline from a dictionary format.
+
+        Args:
+            data: Dictionary containing timeline data
+            clear_existing: If True, clear all existing objects before importing
+
+        Returns:
+            Self for method chaining
+        """
+        if clear_existing:
+            self.objects.clear()
+            self.global_tracks.clear()
+
+        # Import basic timeline properties
+        self.total_frames = data.get('total_frames', self.total_frames)
+        self.frame_rate = data.get('frame_rate', self.frame_rate)
+        self.current_position = data.get('current_position', 0.0)
+
+        # Import objects
+        for obj_id, obj_data in data.get('objects', {}).items():
+            # Create object
+            obj = self.create_object(obj_id)
+
+            # Import metadata
+            if 'metadata' in obj_data:
+                obj.metadata = obj_data['metadata']
+
+            # Import tracks
+            for track_name, track_data in obj_data.get('tracks', {}).items():
+                track = obj.add_track(track_name)
+
+                # Import keyframes
+                for kf_data in track_data.get('keyframes', []):
+                    keyframe = Keyframe(
+                        id=kf_data['id'],
+                        start_pos=kf_data['start_pos'],
+                        start_value=kf_data['start_value'],
+                        end_pos=kf_data['end_pos'],
+                        end_value=kf_data['end_value']
+                    )
+
+                    # Set interpolation type
+                    if 'interpolation_type' in kf_data:
+                        try:
+                            keyframe.interpolation_type = InterpolationType(kf_data['interpolation_type'])
+                        except ValueError:
+                            pass  # Keep default if invalid
+
+                    # Note: Custom curve functions cannot be restored from serialization
+                    # They need to be set manually after import using set_curve()
+
+                    track.add_keyframe(keyframe)
+
+                # Import statements
+                for stmt_data in track_data.get('statements', []):
+                    statement = StatementObject(
+                        id=stmt_data['id'],
+                        start_pos=stmt_data['start_pos'],
+                        end_pos=stmt_data['end_pos'],
+                        data=stmt_data['data'],
+                        active=stmt_data.get('active', True)
+                    )
+                    track.add_statement(statement)
+
+        return self
+
 
 # Built-in curve functions
 class Curves:

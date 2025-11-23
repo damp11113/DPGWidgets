@@ -41,7 +41,8 @@ class TimelineWidget:
         # Color scheme for different interpolation types
         self.colors = {
             "keyframe": [100, 180, 255, 200],
-            "statement": [255, 150, 100, 200]
+            "statement": [255, 150, 100, 200],
+            "selected": [255, 255, 100, 255],
         }
 
         self.mouse_first_click_pos = (0, 0)
@@ -63,6 +64,14 @@ class TimelineWidget:
         self.drag_start_clip_data = None
         self.last_double_click_time = 0
         self.last_double_click_clip = None
+
+        self.custom_colors = {}
+
+    def set_timeline_length(self, total_frames, frame_rate):
+        """Set the total length of the timeline"""
+        self.total_frames = total_frames
+        self.frame_rate = frame_rate
+        self.update_pixels_per_frame()
 
     def update_pixels_per_frame(self):
         """Update pixels per frame based on zoom level"""
@@ -125,6 +134,44 @@ class TimelineWidget:
                         start_track + int(visible_height / (self.track_height + self.track_padding)) + 2)
         return start_track, end_track
 
+    def set_color_for_item(self, object_id, track_name, clip_id, color=None, reset=False):
+        """
+        Set or reset the color for a specific clip (keyframe or statement)
+
+        Args:
+            object_id (str): The object ID
+            track_name (str): The track name within the object
+            clip_id (str): The clip/statement ID
+            color (list, optional): RGBA color as [r, g, b, a] where values are 0-255
+            reset (bool): If True, reset to default color based on clip type
+
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        key = (object_id, track_name, clip_id)
+
+        if reset:
+            # Remove custom color if it exists
+            if key in self.custom_colors:
+                del self.custom_colors[key]
+            return True
+        elif color:
+            # Store custom color
+            self.custom_colors[key] = color.copy()
+            return True
+
+        return False
+
+    def get_clip_color(self, object_id, track_name, clip_id, clip_type):
+        """Get the color for a clip, checking for custom override first"""
+        key = (object_id, track_name, clip_id)
+
+        if key in self.custom_colors:
+            return self.custom_colors[key]
+
+        # Return default color based on type
+        return self.colors.get(clip_type, [100, 180, 255, 200])
+
     def get_flattened_tracks(self, timeline_data):
         """Convert nested object.track structure to flat track list for rendering"""
         flattened_tracks = []
@@ -138,9 +185,10 @@ class TimelineWidget:
                     start_frame = int(statement.get('start_pos', 0))
                     duration_frames = int(statement.get('duration', 1))
                     end_frame = start_frame + duration_frames
+                    clip_id = statement.get('id', '')
 
                     clip = {
-                        "id": statement.get('id', ''),
+                        "id": clip_id,
                         "name": statement.get('id', track_name),
                         "start_frame": start_frame,
                         "end_frame": end_frame,
@@ -149,7 +197,7 @@ class TimelineWidget:
                         "end": statement.get('start_pos', 0) + statement.get('duration', 1),
                         "interpolation": statement.get('interpolation', 'linear'),
                         "has_custom_curve": statement.get('has_custom_curve', False),
-                        "color": self.colors.get("keyframe", [100, 180, 255, 200])
+                        "color": self.get_clip_color(obj_id, track_name, clip_id, "keyframe")
                     }
                     clips.append(clip)
 
@@ -157,9 +205,10 @@ class TimelineWidget:
                     start_frame = int(statement.get('start_pos', 0))
                     duration_frames = int(statement.get('duration', 1))
                     end_frame = start_frame + duration_frames
+                    clip_id = statement.get('id', '')
 
                     clip = {
-                        "id": statement.get('id', ''),
+                        "id": clip_id,
                         "name": statement.get('id', track_name),
                         "start_frame": start_frame,
                         "end_frame": end_frame,
@@ -168,7 +217,7 @@ class TimelineWidget:
                         "end": statement.get('start_pos', 0) + statement.get('duration', 1),
                         "interpolation": None,
                         "has_custom_curve": False,
-                        "color": self.colors.get("statement", [255, 150, 100, 200])
+                        "color": self.get_clip_color(obj_id, track_name, clip_id, "statement")
                     }
                     clips.append(clip)
 
@@ -854,25 +903,6 @@ class TimelineWidget:
             return True
 
         return False
-
-    def update_editor_cursor(self, tracks):
-        """Update cursor based on hover position in editor mode"""
-        if not self.editor_mode_enabled or not dpg.is_item_hovered(self.canvas_id):
-            return
-
-        mouse_pos = dpg.get_mouse_pos(local=False)
-        canvas_pos = dpg.get_item_rect_min(self.canvas_id)
-        mouse_x = mouse_pos[0] - canvas_pos[0]
-        mouse_y = mouse_pos[1] - canvas_pos[1]
-
-        track_idx, clip_idx, edge_type = self.get_clip_at_position(mouse_x, mouse_y, tracks)
-
-        if edge_type in ['front', 'back']:
-            set_cursor_windows(32644)  # IDC_SIZEWE (horizontal resize)
-        elif edge_type == 'middle':
-            set_cursor_windows(32646)  # IDC_SIZEALL (move)
-        else:
-            set_cursor_windows(32512)  # IDC_ARROW
 
     def draw_editor_highlights(self, tracks):
         """Draw visual highlights for selected clips in editor mode"""
